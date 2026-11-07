@@ -1,0 +1,26 @@
+
+# Python virtual environment
+.venv/
+venv/
+
+# IDE settings
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+.env.*
+
+# Logs
+*.log
+
+# Private records
+receipts/
+id_cards/
+
+# Database files
+*.db
+*.sqlite3
