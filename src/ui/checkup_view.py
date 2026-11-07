@@ -90,7 +90,7 @@ class CheckupView(tk.Frame):
         btns = tk.Frame(c2, bg=T.CARD)
         btns.pack(fill="x", padx=16, pady=(10, 0))
         T.button(btns, "Remove", self.remove_item, "ghost").pack(side="left")
-        T.button(btns, "Save & print slip", self.save).pack(side="right")
+        T.button(btns, "Save", self.save).pack(side="right")
         self.msg_label = T.label(c2, "", 9, color=T.MUTED, wraplength=290, justify="left")
         self.msg_label.pack(anchor="w", padx=16, pady=(8, 0))
         T.button(c2, "Recent slips", self.open_recent, "ghost").pack(fill="x", padx=16, pady=(8, 14))
@@ -284,20 +284,15 @@ class CheckupView(tk.Frame):
         self.slip(rx)
 
     def slip(self, rx):
-        """Make the slip picture with the QR code and offer to print it."""
+        """Make the slip picture with the QR code and show it on screen."""
         try:
             path, has_qr = prescription.save_slip(rx)
+            SlipDialog(self, rx, path, has_qr)
         except Exception as err:
             messagebox.showwarning(
                 "Saved, but no slip",
-                f"Prescription {rx['code']} was saved, but the slip could not be made:\n{err}\n\n"
-                "Try 'Reprint' from Recent slips.")
-            return
-        note = "" if has_qr else ("\n\nThe QR code could not be drawn. Run:  uv add qrcode\n"
-                                  "The code is written on the slip, so the pharmacy can type it.")
-        if messagebox.askyesno("Prescription saved",
-                               f"Code: {rx['code']}\nSlip: {path}{note}\n\nPrint it now?"):
-            receipt.print_receipt(path)
+                f"Prescription {rx['code']} was saved, but the slip could not be shown:\n{err}\n\n"
+                "Try 'View' from Recent slips.")
 
     # ---------- recent slips (opens in its own window) ----------
     def open_recent(self):
@@ -308,7 +303,7 @@ class CheckupView(tk.Frame):
         top = tk.Frame(dlg, bg=T.BG)
         top.pack(fill="x", padx=18, pady=(16, 8))
         T.label(top, "Recent prescriptions", 12, True).pack(side="left")
-        T.button(top, "Reprint", self.reprint, "ghost").pack(side="right")
+        T.button(top, "View slip", self.reprint, "ghost").pack(side="right")
         T.button(top, "Cancel selected", self.cancel_rx, "danger").pack(side="right", padx=8)
         frame, self.recent_tree = T.table(dlg, [
             ("code", "Code", 90), ("resident", "Resident", 170), ("items", "Items", 50),
@@ -352,3 +347,40 @@ class CheckupView(tk.Frame):
         if messagebox.askyesno("Cancel prescription", f"Cancel {picked['code']}? Its QR will stop working."):
             db.cancel_prescription(picked["id"])
             self.render_recent()
+
+
+class SlipDialog(tk.Toplevel):
+    """Shows the saved prescription slip (picture with the QR code and its code)."""
+
+    def __init__(self, parent, rx, path, has_qr):
+        super().__init__(parent)
+        from PIL import Image, ImageTk
+        self.path = path
+        self.title(f"Prescription {rx['code']}")
+        self.configure(bg=T.BG)
+        self.resizable(False, False)
+
+        image = Image.open(path)
+        max_h = max(420, self.winfo_screenheight() - 300)
+        if image.height > max_h:                          # fit the screen, keep the proportions
+            scale = max_h / image.height
+            image = image.resize((int(image.width * scale), max_h))
+        self.photo = ImageTk.PhotoImage(image)            # keep a reference, or Tk drops the picture
+
+        body = T.card(self)
+        body.pack(padx=18, pady=18)
+        T.label(body, f"Saved  •  Code {rx['code']}", 12, True, T.GREEN).pack(
+            anchor="w", padx=18, pady=(14, 8))
+        tk.Label(body, image=self.photo, bg="white", bd=0).pack(padx=18)
+        if not has_qr:
+            T.label(body, "The QR could not be drawn. Run:  uv add qrcode\n"
+                          "The code is on the slip, so the pharmacy can type it.", 9, color=T.YELLOW,
+                    justify="left").pack(anchor="w", padx=18, pady=(8, 0))
+        row = tk.Frame(body, bg=T.CARD)
+        row.pack(fill="x", padx=18, pady=14)
+        T.button(row, "Print", lambda: receipt.print_receipt(self.path)).pack(side="left")
+        T.button(row, "Close", self.destroy, "ghost").pack(side="left", padx=8)
+
+        self.transient(parent.winfo_toplevel())
+        self.wait_visibility()
+        self.grab_set()

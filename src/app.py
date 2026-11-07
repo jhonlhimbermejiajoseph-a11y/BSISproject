@@ -1,3 +1,4 @@
+import time
 import tkinter as tk
 
 from src.ui import theme as T
@@ -26,8 +27,8 @@ SCREENS = {
 }
 
 SIDEBAR_W = 210
-SLIDE_STEP = 30          # pixels per animation step
-SLIDE_DELAY = 10         # milliseconds between steps
+SLIDE_TIME = 0.22        # seconds the slide takes
+SLIDE_TICK = 8           # milliseconds between frames
 
 
 class App(tk.Tk):
@@ -47,6 +48,7 @@ class App(tk.Tk):
         self.screen_title = None
         self.sidebar_open = True
         self.sliding = False
+        self.slide_began = 0.0
         self.show_login()
 
     def _clear(self):
@@ -69,8 +71,10 @@ class App(tk.Tk):
         self.sliding = False
         user = auth.current_user()
 
-        sidebar = tk.Frame(self, bg=T.SIDEBAR, width=SIDEBAR_W)
-        sidebar.pack(side="left", fill="y")
+        # The sidebar floats on top of the window (place), so sliding it never
+        # makes the screen next to it redraw. That is what keeps the slide smooth.
+        sidebar = tk.Frame(self, bg=T.SIDEBAR)
+        sidebar.place(x=0, y=0, width=SIDEBAR_W, relheight=1)
         sidebar.pack_propagate(False)
         self.sidebar = sidebar
         head = tk.Frame(sidebar, bg=T.SIDEBAR)
@@ -94,7 +98,7 @@ class App(tk.Tk):
 
         # right side: a thin bar with the burger button, then the screen
         self.right = tk.Frame(self, bg=T.BG)
-        self.right.pack(side="left", fill="both", expand=True)
+        self.right.pack(fill="both", expand=True, padx=(SIDEBAR_W, 0))
         bar = tk.Frame(self.right, bg=T.BG, height=36)
         bar.pack(fill="x")
         bar.pack_propagate(False)
@@ -109,6 +113,7 @@ class App(tk.Tk):
 
         self.content = tk.Frame(self.right, bg=T.BG)
         self.content.pack(fill="both", expand=True)
+        self.sidebar.lift()                                # keep the sidebar above the screen
         self.show_screen(screens[0])
 
     # ---------- burger: slide the sidebar left and back ----------
@@ -117,25 +122,27 @@ class App(tk.Tk):
             return
         self.sliding = True
         if self.sidebar_open:
-            self.slide(SIDEBAR_W, 0)
+            start, target = 0, -SIDEBAR_W
         else:
-            self.sidebar.config(width=1)
-            self.sidebar.pack(side="left", fill="y", before=self.right)
-            self.slide(1, SIDEBAR_W)
+            start, target = -SIDEBAR_W, 0
+            self.sidebar.place_configure(x=start)
+            self.right.pack_configure(padx=(SIDEBAR_W, 0))  # make room first (one redraw)
+            self.update_idletasks()
+        self.slide_began = time.perf_counter()
+        self.slide(start, target)
 
-    def slide(self, width, target):
-        if target < width:
-            width = max(target, width - SLIDE_STEP)
-        else:
-            width = min(target, width + SLIDE_STEP)
-        self.sidebar.config(width=max(width, 1))
-        if width == target:
-            self.sidebar_open = target > 0
+    def slide(self, start, target):
+        """Timed ease-out slide. Only the sidebar moves, so nothing else is redrawn."""
+        t = min(1.0, (time.perf_counter() - self.slide_began) / SLIDE_TIME)
+        eased = 1 - (1 - t) ** 3
+        self.sidebar.place_configure(x=int(round(start + (target - start) * eased)))
+        if t >= 1.0:
+            self.sidebar_open = target == 0
             if not self.sidebar_open:
-                self.sidebar.pack_forget()
+                self.right.pack_configure(padx=0)           # screen takes the full width (one redraw)
             self.sliding = False
             return
-        self.after(SLIDE_DELAY, lambda: self.slide(width, target))
+        self.after(SLIDE_TICK, lambda: self.slide(start, target))
 
     def show_screen(self, name):
         if not auth.can_access(name):
