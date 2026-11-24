@@ -65,9 +65,9 @@ def setup_styles(root):
     style = ttk.Style(root)
     style.theme_use("clam")
     style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT,
-                    rowheight=28, borderwidth=0, font=FONT)
+                    rowheight=32, borderwidth=0, font=FONT)
     style.configure("Treeview.Heading", background=SIDEBAR, foreground=MUTED, relief="flat",
-                    font=FONT_BOLD, padding=(8, 6))
+                    font=FONT_BOLD, padding=(6, 9))
     style.map("Treeview", background=[("selected", "#1f3a30")], foreground=[("selected", GREEN)])
     style.map("Treeview.Heading", background=[("active", SIDEBAR)])
     style.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=TEXT,
@@ -77,7 +77,8 @@ def setup_styles(root):
               foreground=[("readonly", TEXT)], selectbackground=[("readonly", FIELD)],
               selectforeground=[("readonly", TEXT)])
     style.configure("Vertical.TScrollbar", background=FIELD, troughcolor=CARD, bordercolor=CARD,
-                    arrowcolor=MUTED, lightcolor=FIELD, darkcolor=FIELD)
+                    arrowcolor=MUTED, lightcolor=FIELD, darkcolor=FIELD, arrowsize=12, gripcount=0)
+    style.map("Vertical.TScrollbar", background=[("active", BORDER)])
     root.option_add("*TCombobox*Listbox.background", FIELD)
     root.option_add("*TCombobox*Listbox.foreground", TEXT)
     root.option_add("*TCombobox*Listbox.selectBackground", GREEN)
@@ -98,11 +99,14 @@ def card(parent, **kw):
 def button(parent, text, command, kind="primary"):
     """kind: 'primary' (green), 'danger' (red outline) or 'ghost' (grey)."""
     bg, fg = {"primary": (GREEN, "#001a0d"), "danger": (CARD, RED), "ghost": (FIELD, TEXT)}[kind]
-    b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, activebackground=bg,
-                  activeforeground=fg, relief="flat", bd=0, font=FONT_BOLD, padx=14, pady=6,
-                  cursor="hand2")
+    over = {"primary": "#22e582", "danger": "#2a1c20", "ghost": "#26373f"}[kind]      # colour under the mouse
+    b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, activebackground=over,
+                  activeforeground=fg, relief="flat", bd=0, font=FONT_BOLD, padx=16, pady=7,
+                  cursor="hand2", highlightthickness=0)
     if kind == "danger":
         b.config(highlightthickness=1, highlightbackground=RED)
+    b.bind("<Enter>", lambda e: b.config(bg=over) if str(b["state"]) != "disabled" else None)
+    b.bind("<Leave>", lambda e: b.config(bg=bg))
     return b
 
 
@@ -141,7 +145,7 @@ def labeled_combo(parent, text, width=24, values=()):
 
 def header(parent, title, subtitle=""):
     box = tk.Frame(parent, bg=parent["bg"])
-    label(box, title, 20, True).pack(anchor="w")
+    label(box, title, 22, True).pack(anchor="w")
     if subtitle:
         label(box, subtitle, 10, color=MUTED).pack(anchor="w", pady=(2, 0))
     return box
@@ -180,11 +184,13 @@ def table(parent, columns, height=10):
     tree.tag_configure("ok", foreground=GREEN)
     tree.tag_configure("warn", foreground=YELLOW)
     tree.tag_configure("bad", foreground=RED)
+    tree.tag_configure("odd", background="#18242c")                  # light stripe on every second row
     return frame, tree
 
 
 def fill(tree, rows):
     """rows: list of (iid, values, tag_or_None)."""
     tree.delete(*tree.get_children())
-    for iid, values, tag in rows:
-        tree.insert("", "end", iid=str(iid), values=values, tags=(tag,) if tag else ())
+    for i, (iid, values, tag) in enumerate(rows):
+        tags = ((tag,) if tag else ()) + (("odd",) if i % 2 else ())
+        tree.insert("", "end", iid=str(iid), values=values, tags=tags)

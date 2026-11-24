@@ -7,10 +7,9 @@ ROLES = ("BHW", "Check-up", "Admin")
 
 # Sidebar screens each role is allowed to open (the order here is the sidebar order).
 PERMISSIONS = {
-    "BHW": ["Requests", "Residents", "Pharmacy", "Inventory", "Medicines"],
-    "Check-up": ["Check-up", "Inventory", "Medicines", "Deliveries", "Reports"],
-    "Admin": ["Requests", "Residents", "Check-up", "Pharmacy", "Inventory", "Medicines",
-              "Deliveries", "Reports", "Users"],
+    "BHW": ["Medicines", "Requests", "Prescriptions", "Residents", "Inventory"],
+    "Check-up": ["Check-up", "Medicines", "Inventory"],
+    "Admin": ["Reports", "Inventory", "Deliveries", "Residents", "Users"],   # monitors and manages; does not serve customers
 }
 
 _current_user = None
@@ -65,8 +64,8 @@ def can_access(screen):
 
 
 def can_manage_inventory():
-    """Check-up and Admin can add, edit and delete in Inventory. BHW can only look."""
-    return bool(_current_user) and _current_user["role"] in ("Check-up", "Admin")
+    """Only Admin can add, edit and delete in Inventory. BHW and Check-up can only look."""
+    return bool(_current_user) and _current_user["role"] == "Admin"
 
 
 def is_admin():

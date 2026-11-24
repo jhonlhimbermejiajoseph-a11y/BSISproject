@@ -5,9 +5,13 @@ from tkinter import messagebox
 from src.dsa.hash_table import HashTable
 from src.dsa.merge_sort import merge_sort
 from src.ui import theme as T
-from src.ui.scan_dialog import open_scanner
+from src.ui.inventory_view import stat_tile
 from src.utils import auth, database as db, id_card, receipt, subsidy
 from src.utils.scanner import bind_scanner
+
+
+WALK_IN = "Walk-in customer"      # internal buyer for customers without an ID; never shown in this list
+BLUE = "#3aa0ff"
 
 
 class ResidentsView(tk.Frame):
@@ -20,13 +24,25 @@ class ResidentsView(tk.Frame):
 
     # ---------- layout ----------
     def _build(self):
-        T.header(self, "Residents", "Register residents and look them up by scanned ID.").pack(
+        T.header(self, "Residents", "Register residents and look them up by ID or name.").pack(
             fill="x", padx=28, pady=(22, 12))
 
-        # search / scan
+        tiles = tk.Frame(self, bg=T.BG)
+        tiles.pack(fill="x", padx=28, pady=(0, 12))
+        self.tile = {}
+        for i, (key, text, accent) in enumerate([
+            ("total", "Registered residents", T.GREEN), ("Senior Citizen", "Senior citizens", BLUE),
+            ("PWD", "PWD", T.YELLOW), ("Low-income", "Low-income", "#ff9f1a"),
+        ]):
+            tiles.columnconfigure(i, weight=1, uniform="tile")
+            box, value = stat_tile(tiles, text, accent)
+            box.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 10, 0))
+            self.tile[key] = value
+
+        # search
         find = T.card(self)
         find.pack(fill="x", padx=28)
-        T.label(find, "Scan or type a resident ID (or part of a name)", 10, True).pack(
+        T.label(find, "Type a resident ID (or part of a name)", 10, True).pack(
             anchor="w", padx=16, pady=(14, 6))
         row = tk.Frame(find, bg=T.CARD)
         row.pack(fill="x", padx=16)
@@ -35,8 +51,6 @@ class ResidentsView(tk.Frame):
         handle = bind_scanner(self.scan_entry, self.find)
         T.button(row, "Find", handle).pack(side="left", padx=8)
         T.button(row, "Show all", self.show_all, "ghost").pack(side="left")
-        T.button(row, "Scan with camera", lambda: open_scanner(self, self.find), "ghost").pack(
-            side="left", padx=8)
         self.find_label = T.label(find, "", 10, color=T.MUTED, justify="left")
         self.find_label.pack(anchor="w", padx=16, pady=(8, 14))
 
@@ -73,9 +87,12 @@ class ResidentsView(tk.Frame):
 
     # ---------- data ----------
     def refresh(self):
-        self.rows = db.get_residents()
+        self.rows = [r for r in db.get_residents() if r["full_name"] != WALK_IN]   # hide the walk-in record
         self.by_id.clear()
         self.by_id.load(self.rows, "scanned_id")
+        self.tile["total"].config(text=str(len(self.rows)))
+        for category in ("Senior Citizen", "PWD", "Low-income"):
+            self.tile[category].config(text=str(sum(1 for r in self.rows if r["category"] == category)))
         self.render(self.rows)
 
     def render(self, rows):
@@ -146,13 +163,15 @@ class ResidentsView(tk.Frame):
             messagebox.showinfo("Select a resident", "Click a resident in the table first.")
             return
         resident = self.by_id.get(sel[0])
-        if not messagebox.askyesno("Delete resident", f"Delete {resident['full_name']}?"):
+        if not messagebox.askyesno("Delete resident", f"Delete {resident['full_name']} ({resident['scanned_id']})?"):
             return
         try:
             db.delete_resident(resident["id"])
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Cannot delete", "This resident already has medicine requests.")
+        except sqlite3.Error:                                  # the resident has requests or prescriptions
+            messagebox.showerror("Cannot delete", f"{resident['full_name']} already has medicine requests or "
+                                                  "prescriptions, so the record must be kept.")
             return
+        self.find_label.config(text=f"Deleted {resident['full_name']}.", fg=T.MUTED)
         self.refresh()
 
 

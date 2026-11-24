@@ -9,7 +9,7 @@ from src.utils.scanner import bind_scanner
 
 
 class DispenseView(tk.Frame):
-    """Pharmacy: scan the QR on the patient's slip, see the prices, dispense."""
+    """Prescriptions: scan the QR on the patient's slip, see the prices, dispense."""
 
     def __init__(self, parent):
         super().__init__(parent, bg=T.BG)
@@ -20,8 +20,8 @@ class DispenseView(tk.Frame):
 
     # ---------- layout ----------
     def _build(self):
-        T.header(self, "Pharmacy",
-                 "Scan the QR on the patient's slip, check the prices, then dispense.").pack(
+        T.header(self, "Prescriptions",
+                 "Scan the QR on the slip from Check-up, check the prices, then dispense.").pack(
             fill="x", padx=28, pady=(22, 12))
         body = tk.Frame(self, bg=T.BG)
         body.pack(fill="both", expand=True, padx=28, pady=(0, 22))
@@ -86,10 +86,11 @@ class DispenseView(tk.Frame):
         """Prices, discount and FEFO stock check for each medicine on the prescription."""
         self.rows = []
         for item in self.rx["items"]:
-            calc = subsidy.calculate(item["unit_price"], item["quantity"], self.rx["category"])
-            allocations, shortfall = allocate_fefo(item["sku"], item["quantity"])
-            self.rows.append({"item": item, "calc": calc, "shortfall": shortfall,
-                              "stock": db.available_stock(item["sku"])})
+            stock = db.available_stock(item["sku"])
+            give = max(0, min(item["quantity"], stock))      # what we can really hand over
+            calc = subsidy.calculate(item["unit_price"], give, self.rx["category"])
+            self.rows.append({"item": item, "calc": calc, "give": give,
+                              "shortfall": item["quantity"] - give, "stock": stock})
 
     def clear(self):
         self.rx = None
@@ -117,19 +118,23 @@ class DispenseView(tk.Frame):
                 text=f"Already dispensed on {rx['dispensed_at']}. This QR cannot be used again.", fg=T.RED)
         elif rx["status"] == "Cancelled":
             self.status_label.config(text="This prescription was cancelled.", fg=T.RED)
+        elif short and not any(r["give"] for r in self.rows):
+            self.status_label.config(text="Nothing on this prescription is in stock. Restock first.", fg=T.RED)
         elif short:
             self.status_label.config(
-                text="Not enough stock for: " + ", ".join(short) + ". Restock first, or ask Check-up "
-                     "to change the prescription.", fg=T.RED)
+                text="Short on stock: " + ", ".join(short) + ". You can still dispense; "
+                     "only what is available is given and charged.", fg=T.YELLOW)
         else:
             self.status_label.config(
                 text=f"{rx['category']}  \u2022  {rate:.0f}% subsidy  \u2022  Ready to dispense.", fg=T.GREEN)
 
         T.fill(self.tree, [
-            (i, (r["item"]["medicine_name"], r["item"]["quantity"],
+            (i, (r["item"]["medicine_name"],
+                 r["item"]["quantity"] if not r["shortfall"] else f"{r['give']} of {r['item']['quantity']}",
                  f"{r['item']['unit_price']:,.2f}", f"{r['calc']['gross']:,.2f}",
                  f"-{r['calc']['subsidy']:,.2f}", f"{r['calc']['total']:,.2f}",
-                 f"Short ({r['stock']})" if r["shortfall"] > 0 else f"OK ({r['stock']})"),
+                 ("Out of stock" if r["stock"] <= 0 else f"Only {r['stock']} left")
+                 if r["shortfall"] > 0 else f"OK ({r['stock']})"),
              "warn" if r["shortfall"] > 0 else None)
             for i, r in enumerate(self.rows)
         ])
@@ -149,21 +154,30 @@ class DispenseView(tk.Frame):
             messagebox.showwarning("Verification needed", "Tick the ID / eligibility check first.")
             return
 
-        # Re-check the stock right now (FEFO, earliest expiry first), then dispense everything.
-        lines = []
+        # Re-check the stock right now (FEFO, earliest expiry first). Give what is available.
+        lines, skipped = [], []
         for item in self.rx["items"]:
-            allocations, shortfall = allocate_fefo(item["sku"], item["quantity"])
-            if shortfall > 0:
-                self.compute()
-                self.render()
-                self._say(f"Not enough stock for {item['medicine_name']}. Nothing was dispensed.", T.RED)
-                return
+            give = max(0, min(item["quantity"], db.available_stock(item["sku"])))
+            if give < item["quantity"]:
+                skipped.append(f"{item['medicine_name']} ({give} of {item['quantity']})")
+            if give == 0:
+                continue
+            allocations, shortfall = allocate_fefo(item["sku"], give)
             lines.append({
-                "sku": item["sku"], "quantity": item["quantity"],
+                "sku": item["sku"], "quantity": give,
                 "allocations": [(b["id"], n) for b, n in allocations],
-                "calc": subsidy.calculate(item["unit_price"], item["quantity"], self.rx["category"]),
+                "calc": subsidy.calculate(item["unit_price"], give, self.rx["category"]),
                 "batch_info": ", ".join(f"{b['batch_no']} x{n}" for b, n in allocations),
             })
+        if not lines:
+            self.compute()
+            self.render()
+            self._say("Nothing on this prescription is in stock. Nothing was dispensed.", T.RED)
+            return
+        if skipped and not messagebox.askyesno(
+                "Short on stock", "These are not fully available:\n\n" + "\n".join(f"\u2022 {x}" for x in skipped)
+                                  + "\n\nDispense the rest and show the receipt?"):
+            return
         try:
             tids = db.dispense_prescription(self.rx, lines, auth.current_user()["id"])
         except ValueError as err:

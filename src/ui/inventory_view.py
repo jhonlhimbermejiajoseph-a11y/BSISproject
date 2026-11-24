@@ -5,6 +5,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
+from src.dsa.bst import BST
 from src.dsa.merge_sort import merge_sort
 from src.ui import theme as T
 from src.utils import auth, database as db
@@ -22,6 +23,7 @@ PICTURE_TYPES = [("Pictures", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"), ("All fi
 PILLOW_HINT = "Pictures need Pillow. Open the PyCharm Terminal and run:\n    uv add pillow"
 ADD_HINT = "Record stock for a new medicine in the Deliveries screen."
 PANEL_W, PIC_W, PIC_H = 290, 258, 170
+CARD_W, CARD_H = 198, 322                      # medicine cards (Cards view)
 
 
 # ---------- medicine pictures: assets/medicines/<CODE>.png ----------
@@ -87,8 +89,24 @@ class InventoryView(tk.Frame):
         self.filter_value = None
         self.low_skus = set()
         self.chips = {}
+        self.view_mode = "cards"                       # "cards" (one card per medicine) or "table" (one row per batch)
+        self.view_buttons = {}
+        self.selected = None                           # iid of the selected row / card
+        self.info = {}                                 # per-medicine numbers shown on the cards
+        self.name_tree = None
+        self.cards = []
+        self.card_photos = {}
+        self.cols = 3
         self._build()
+        self.bind_all("<MouseWheel>", self.on_wheel)
         self.refresh()
+
+    def destroy(self):
+        try:
+            self.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+        super().destroy()
 
     # ---------- layout ----------
     def _build(self):
@@ -98,6 +116,12 @@ class InventoryView(tk.Frame):
                  "Sorted by FEFO: the earliest expiry is listed first.").pack(side="left")
         if self.can_edit:
             T.button(top, "+  Add medicine", self.open_add).pack(side="right", anchor="s")
+        for text, mode in (("Table", "table"), ("Cards", "cards")):          # how to show the medicines
+            btn = tk.Button(top, text=text, relief="flat", bd=0, font=T.FONT, padx=12, pady=5,
+                            cursor="hand2", highlightthickness=0, command=lambda m=mode: self.set_view(m))
+            btn.pack(side="right", padx=(6, 0) if mode == "cards" else (6, 0), anchor="s",
+                     pady=(0, 2))
+            self.view_buttons[mode] = btn
 
         stats = tk.Frame(self, bg=T.BG)
         stats.pack(fill="x", padx=28)
@@ -118,12 +142,12 @@ class InventoryView(tk.Frame):
         bar.pack(fill="x", padx=28, pady=(16, 8))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *a: self.render())
-        search = T.entry(bar, 30)
+        search = T.entry(bar, 22)
         search.config(textvariable=self.search_var)
         search.pack(side="left", ipady=6)
-        T.label(bar, "Search code, name or batch", 9, color=T.MUTED).pack(side="left", padx=(10, 18))
+        T.label(bar, "Code, name or batch", 9, color=T.MUTED).pack(side="left", padx=(8, 14))
         for text, value in FILTERS:
-            chip = tk.Button(bar, text=text, relief="flat", bd=0, font=T.FONT, padx=12, pady=5,
+            chip = tk.Button(bar, text=text, relief="flat", bd=0, font=T.FONT, padx=10, pady=5,
                              cursor="hand2", highlightthickness=0, command=lambda v=value: self.set_filter(v))
             chip.pack(side="left", padx=(0, 6))
             self.chips[value] = chip
@@ -133,10 +157,27 @@ class InventoryView(tk.Frame):
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
         frame, self.tree = T.table(body, [
-            ("sku", "Code", 90), ("name", "Medicine", 210), ("batch", "Batch", 90),
-            ("qty", "Stock", 60), ("expiry", "Expiry", 100), ("status", "Status", 120),
+            ("sku", "Code", 80), ("name", "Medicine", 160), ("batch", "Batch", 80),
+            ("qty", "Stock", 55), ("expiry", "Expiry", 95), ("status", "Status", 105),
         ], height=10)
+        for column in ("sku", "name", "batch", "qty", "expiry", "status"):
+            self.tree.column(column, minwidth=45)          # columns may shrink in a narrow window
         frame.grid(row=0, column=0, sticky="nsew")
+        self.table_frame = frame
+
+        # cards view: every medicine as a picture card
+        self.cards_wrap = tk.Frame(body, bg=T.BG)
+        self.cards_wrap.grid(row=0, column=0, sticky="nsew")
+        self.canvas = tk.Canvas(self.cards_wrap, bg=T.BG, highlightthickness=0)
+        scroll = ttk.Scrollbar(self.cards_wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.grid_frame = tk.Frame(self.canvas, bg=T.BG)
+        self.window = self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.canvas.bind("<Configure>", self.on_resize)
+        self.grid_frame.bind("<Configure>",
+                             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         style = ttk.Style(self)                      # roomier rows, only for this table
         style.configure("Inv.Treeview", background=T.CARD, fieldbackground=T.CARD, foreground=T.TEXT,
                         rowheight=36, borderwidth=0, font=T.FONT)
@@ -165,7 +206,7 @@ class InventoryView(tk.Frame):
         self.photo_label.place(relx=0.5, rely=0.5, anchor="center")
         self.p_name = T.label(self.preview, "Select a medicine", 13, True, wraplength=PIC_W, justify="left")
         self.p_name.pack(anchor="w", padx=16, pady=(14, 0))
-        self.p_sub = T.label(self.preview, "Click a row to see its details.", 10, color=T.MUTED,
+        self.p_sub = T.label(self.preview, "Click a medicine to see its details.", 10, color=T.MUTED,
                              wraplength=PIC_W, justify="left")
         self.p_sub.pack(anchor="w", padx=16, pady=(2, 0))
         self.p_pill = tk.Label(self.preview, text="", bg=T.CARD, fg=T.MUTED, font=("Segoe UI", 9, "bold"))
@@ -176,6 +217,155 @@ class InventoryView(tk.Frame):
         self.p_stock.pack(anchor="w", padx=16, pady=(6, 0))
         self.p_info = T.label(self.preview, "", 10, color=T.MUTED, wraplength=PIC_W, justify="left")
         self.p_info.pack(anchor="w", padx=16, pady=(8, 0))
+        self.set_view(self.view_mode)
+
+    # ---------- Cards / Table ----------
+    def set_view(self, mode):
+        self.view_mode = mode
+        if mode == "cards":
+            self.table_frame.grid_remove()
+            self.cards_wrap.grid()
+        else:
+            self.cards_wrap.grid_remove()
+            self.table_frame.grid()
+        for m, btn in self.view_buttons.items():
+            on = m == mode
+            btn.config(bg=T.GREEN if on else T.FIELD, fg="#001a0d" if on else T.TEXT,
+                       activebackground=T.GREEN if on else T.FIELD,
+                       activeforeground="#001a0d" if on else T.TEXT)
+        if self.rows:
+            self.select(self.selected)
+
+    def on_resize(self, event):
+        self.canvas.itemconfigure(self.window, width=event.width)
+        cols = max(1, event.width // (CARD_W + 14))
+        if cols != self.cols:
+            self.cols = cols
+            self.layout_cards()
+
+    def on_wheel(self, event):
+        if self.view_mode != "cards":
+            return
+        try:
+            self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        except tk.TclError:
+            pass
+
+    def layout_cards(self):
+        for i, card in enumerate(self.cards):
+            card.grid(row=i // self.cols, column=i % self.cols, padx=(0, 14), pady=(0, 14), sticky="n")
+
+    def primary_iid(self, sku):
+        """The row that stands for a medicine: its next batch to use (FEFO), else any row of it."""
+        info = self.info.get(sku)
+        if info and info["next"]:
+            return info["next"]["iid"]
+        mine = [r for r in self.rows if r["sku"] == sku]
+        return mine[0]["iid"] if mine else None
+
+    def visible_meds(self, text):
+        """Medicines to show as cards: filter chip + search, in name order (Binary Search Tree)."""
+        shown = []
+        for m in self.name_tree.in_order():
+            info = self.info[m["sku"]]
+            if not self.med_matches_filter(m["sku"], info):
+                continue
+            batches = " ".join(r["batch"] for r in self.rows if r["sku"] == m["sku"])
+            if text and text not in f"{m['sku']} {m['name']} {batches}".lower():
+                continue
+            shown.append(m)
+        return shown
+
+    def med_matches_filter(self, sku, info):
+        if self.filter_value is None:
+            return True
+        if self.filter_value == "Low stock":
+            return sku in self.low_skus
+        if self.filter_value == "Expiring soon":
+            return info["soon"]
+        if self.filter_value == "Expired":
+            return info["expired"] > 0
+        return info["stock"] <= 0                                    # Out of stock
+
+    def render_cards(self, meds):
+        for card in self.cards:
+            card.destroy()
+        self.cards = []
+        if not meds:
+            note = "No medicines yet." if not self.info else "No medicines match."
+            empty = T.label(self.grid_frame, note, 11, color=T.MUTED)
+            empty.grid(row=0, column=0, pady=30, sticky="w")
+            self.cards.append(empty)
+            return
+        for m in meds:
+            self.cards.append(self.make_card(m))
+        self.layout_cards()
+
+    def make_card(self, m):
+        sku = m["sku"]
+        info = self.info[sku]
+        color = STATUS_COLOR[info["status"]]
+        card = T.card(self.grid_frame, width=CARD_W, height=CARD_H)
+        card.pack_propagate(False)
+        card.sku = sku
+
+        pic = tk.Frame(card, bg=T.FIELD, width=CARD_W - 24, height=122)
+        pic.pack(padx=12, pady=(12, 8))
+        pic.pack_propagate(False)
+        if sku not in self.card_photos:
+            self.card_photos[sku] = load_medicine_photo(sku, (CARD_W - 24, 122))
+        photo = self.card_photos[sku]
+        if photo:
+            tk.Label(pic, image=photo, bg=T.FIELD).place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            tk.Label(pic, text="No picture", bg=T.FIELD, fg=T.MUTED, font=T.FONT).place(
+                relx=0.5, rely=0.5, anchor="center")
+
+        T.label(card, m["name"], 11, True, wraplength=CARD_W - 28, justify="left").pack(anchor="w", padx=14)
+        T.label(card, f"{sku}  \u2022  PHP {m['unit_price']:,.2f}", 9, color=T.MUTED).pack(
+            anchor="w", padx=14, pady=(2, 0))
+        T.label(card, f"\u25cf  {info['status']}", 10, True, color).pack(anchor="w", padx=14, pady=(8, 0))
+
+        low = m["low_stock_level"]
+        bar = tk.Canvas(card, width=CARD_W - 28, height=6, bg=T.FIELD, highlightthickness=0)
+        bar.pack(padx=14, pady=(6, 0))
+        ratio = min(1.0, info["stock"] / max(low * 2, 1))
+        if ratio > 0:
+            bar.create_rectangle(0, 0, (CARD_W - 28) * ratio, 6, width=0,
+                                 fill=T.YELLOW if info["stock"] <= low else T.GREEN)
+        T.label(card, f"{info['stock']} in stock", 10, True).pack(anchor="w", padx=14, pady=(4, 0))
+        nxt = info["next"]
+        T.label(card, f"Next: {nxt['batch']} \u2022 {nxt['expiry']}" if nxt else "No batch to use",
+                8, color=T.MUTED).pack(anchor="w", padx=14, pady=(2, 0))
+        if info["expired"]:
+            T.label(card, f"{info['expired']} expired batch" + ("es" if info["expired"] > 1 else ""),
+                    8, True, T.RED).pack(anchor="w", padx=14)
+
+        def click(event=None, sku=sku):
+            self.select(self.primary_iid(sku))
+
+        def bind_all_children(widget):                       # click anywhere on the card
+            widget.bind("<Button-1>", click)
+            if self.can_edit:
+                widget.bind("<Double-1>", lambda e: self.edit_selected())
+            widget.configure(cursor="hand2")
+            for child in widget.winfo_children():
+                bind_all_children(child)
+        bind_all_children(card)
+        return card
+
+    def select(self, iid):
+        """Select one row (table) or card, and show its details on the right."""
+        self.selected = iid if iid in self.by_iid else None
+        if self.selected and self.tree.exists(self.selected):
+            self.tree.selection_set(self.selected)
+        else:
+            self.tree.selection_remove(self.tree.selection())
+        want = self.by_iid[self.selected]["sku"] if self.selected else None
+        for card in self.cards:
+            on = getattr(card, "sku", None) == want and want is not None
+            card.config(highlightbackground=T.GREEN if on else T.BORDER, highlightthickness=2 if on else 1)
+        self.show_preview(self.selected)
 
     # ---------- filter chips ----------
     def set_filter(self, value):
@@ -214,6 +404,26 @@ class InventoryView(tk.Frame):
         self.rows = merge_sort(rows, key=lambda r: (r["expiry"] == "-", r["expiry"]))
         self.by_iid = {r["iid"]: r for r in self.rows}
 
+        self.name_tree = BST.build(meds, key=lambda m: m["name"].lower())     # Binary Search Tree
+        self.card_photos.clear()
+        self.info = {}
+        for m in meds:
+            sku = m["sku"]
+            mine = [r for r in self.rows if r["sku"] == sku and r["qty"] > 0]   # already in FEFO order
+            stock = self.stock.get(sku, 0)
+            soon = any(r["status"] == "Expiring soon" for r in mine)
+            if stock <= 0:
+                status = "Out of stock"
+            elif sku in low_skus:
+                status = "Low stock"
+            elif soon:
+                status = "Expiring soon"
+            else:
+                status = "OK"
+            self.info[sku] = {"stock": stock, "status": status, "soon": soon,
+                              "expired": sum(r["status"] == "Expired" for r in mine),
+                              "next": next((r for r in mine if r["status"] != "Expired"), None)}
+
         self.stat["total"].config(text=str(len(meds)))
         self.stat["low"].config(text=str(len(low_skus)))
         self.stat["soon"].config(text=str(sum(r["status"] == "Expiring soon" for r in rows)))
@@ -228,26 +438,32 @@ class InventoryView(tk.Frame):
         return row["status"] == self.filter_value
 
     def render(self):
-        sel = self.tree.selection()
-        keep = sel[0] if sel else None
         text = self.search_var.get().strip().lower()
         shown = [r for r in self.rows
                  if self.matches_filter(r) and text in f"{r['sku']} {r['name']} {r['batch']}".lower()]
         T.fill(self.tree, [
-            (r["iid"], (r["sku"], r["name"], r["batch"], r["qty"], r["expiry"], f"●  {r['status']}"),
+            (r["iid"], (r["sku"], r["name"], r["batch"], r["qty"], r["expiry"], f"\u25cf  {r['status']}"),
              STATUS_TAG[r["status"]])
             for r in shown
         ])
-        if keep and keep in self.by_iid and any(r["iid"] == keep for r in shown):
-            self.tree.selection_set(keep)
-            self.show_preview(keep)
-        else:
-            self.show_preview(None)
+        meds = self.visible_meds(text)
+        self.render_cards(meds)
+
+        keep = self.selected if self.selected in self.by_iid else None
+        if keep:
+            if self.view_mode == "table":
+                still_there = any(r["iid"] == keep for r in shown)
+            else:
+                still_there = self.by_iid[keep]["sku"] in {m["sku"] for m in meds}
+            if not still_there:
+                keep = None
+        self.select(keep)
 
     # ---------- details panel ----------
     def on_select(self):
         sel = self.tree.selection()
-        self.show_preview(sel[0] if sel else None)
+        if sel and sel[0] != self.selected:
+            self.select(sel[0])
 
     def show_preview(self, iid):
         row = self.by_iid.get(iid) if iid else None
@@ -256,7 +472,7 @@ class InventoryView(tk.Frame):
             self.photo = None
             self.photo_label.config(image="", text="No picture")
             self.p_name.config(text="Select a medicine")
-            self.p_sub.config(text="Click a row to see its details.")
+            self.p_sub.config(text="Click a medicine to see its details.")
             self.p_pill.config(text="", bg=T.CARD, padx=0)
             self.p_stock.config(text="")
             self.p_info.config(text="")
@@ -292,29 +508,29 @@ class InventoryView(tk.Frame):
         AddDialog(self, self.refresh)
 
     def edit_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Select a row", "Click a medicine in the table first.")
+        if not self.selected:
+            messagebox.showinfo("Select a medicine", "Click a medicine first.")
             return
-        EditDialog(self, self.by_iid[sel[0]], self.refresh)
+        EditDialog(self, self.by_iid[self.selected], self.refresh)
 
     def delete_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Select a row", "Click a row in the table first.")
+        if not self.selected:
+            messagebox.showinfo("Select a medicine", "Click a medicine first.")
             return
-        iid = sel[0]
-        if iid.startswith("b"):
+        iid = self.selected
+        if self.view_mode == "table" and iid.startswith("b"):
             if messagebox.askyesno("Delete batch", "Delete this batch from the inventory?"):
                 db.delete_batch(int(iid[1:]))
         else:
-            sku = iid[1:]
-            if messagebox.askyesno("Delete medicine", f"Delete medicine {sku}?"):
+            sku = self.by_iid[iid]["sku"]
+            name = self.meds[sku]["name"]
+            if messagebox.askyesno("Delete medicine", f"Delete {name} ({sku}) and all its batches?"):
                 try:
                     db.delete_medicine(sku)
                     remove_medicine_image(sku)
                 except sqlite3.IntegrityError:
                     messagebox.showerror("Cannot delete", "This medicine already has request history.")
+        self.selected = None
         self.refresh()
 
 

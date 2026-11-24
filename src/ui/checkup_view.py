@@ -1,8 +1,9 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from src.dsa.bst import BST
 from src.dsa.hash_table import HashTable
-from src.dsa.merge_sort import merge_sort
+from src.dsa.stack import Stack
 from src.ui import theme as T
 from src.ui.catalog_view import STATUS_COLOR, stock_status
 from src.ui.inventory_view import load_medicine_photo
@@ -23,6 +24,7 @@ class CheckupView(tk.Frame):
         self.medicines = HashTable()     # SKU -> medicine
         self.resident = None
         self.items = []                  # [{"sku", "name", "qty"}]
+        self.history = Stack()           # LIFO: every add / remove is pushed, Undo pops the newest
         self.res_labels = {}
         self.meds = []
         self.stock = {}
@@ -84,12 +86,14 @@ class CheckupView(tk.Frame):
         c2.pack(fill="both", expand=True, pady=(14, 0))
         T.label(c2, "2. Prescription", 11, True).pack(anchor="w", padx=16, pady=(14, 8))
         frame, self.item_tree = T.table(c2, [
-            ("n", "#", 30), ("medicine", "Medicine", 150), ("qty", "Qty", 40), ("stock", "Stock", 56),
+            ("n", "#", 34), ("medicine", "Medicine", 140), ("qty", "Qty", 48), ("stock", "Stock", 64),
         ], height=6)
         frame.pack(fill="both", expand=True, padx=16)
         btns = tk.Frame(c2, bg=T.CARD)
         btns.pack(fill="x", padx=16, pady=(10, 0))
         T.button(btns, "Remove", self.remove_item, "ghost").pack(side="left")
+        self.undo_btn = T.button(btns, "Undo", self.undo, "ghost")
+        self.undo_btn.pack(side="left", padx=(8, 0))
         T.button(btns, "Save", self.save).pack(side="right")
         self.msg_label = T.label(c2, "", 9, color=T.MUTED, wraplength=290, justify="left")
         self.msg_label.pack(anchor="w", padx=16, pady=(8, 0))
@@ -145,6 +149,7 @@ class CheckupView(tk.Frame):
     def refresh(self):
         residents = db.get_residents()
         self.meds = db.get_medicines()
+        self.name_tree = BST.build(self.meds, key=lambda m: m["name"].lower())   # Binary Search Tree
         self.stock = db.stock_by_sku()
         self.residents.clear()
         self.residents.load(residents, "scanned_id")
@@ -165,8 +170,13 @@ class CheckupView(tk.Frame):
             card.destroy()
         self.cards = []
         text = self.search_var.get().strip().lower()
-        shown = [m for m in self.meds if not text or text in f"{m['sku']} {m['name']}".lower()]
-        shown = merge_sort(shown, key=lambda m: m["name"].lower())          # Merge Sort by name
+        if not text:
+            shown = self.name_tree.in_order()                               # BST in-order = sorted by name
+        else:
+            shown = self.name_tree.starts_with(text)                        # BST prefix search
+            if not shown:                                                   # fall back: name/SKU contains text
+                shown = [m for m in self.name_tree.in_order()
+                         if text in f"{m['sku']} {m['name']}".lower()]
         if not shown:
             empty = T.label(self.grid_frame, "No medicines match your search.", 11, color=T.MUTED)
             empty.grid(row=0, column=0, pady=30, sticky="w")
@@ -222,11 +232,14 @@ class CheckupView(tk.Frame):
                 break
         else:
             self.items.append({"sku": sku, "name": name, "qty": qty})
+        self.history.push(("add", sku, name, qty))                # remember it for Undo
         self._say(f"Added {name} x {qty}.", T.GREEN)
         self.render_items()
 
     # ---------- prescription list ----------
     def render_items(self):
+        n = len(self.history)
+        self.undo_btn.config(text=f"Undo ({n})" if n else "Undo")
         stock = db.stock_by_sku()
         T.fill(self.item_tree, [
             (i, (i + 1, it["name"], it["qty"], stock.get(it["sku"], 0)), None)
@@ -238,7 +251,30 @@ class CheckupView(tk.Frame):
         if not sel:
             messagebox.showinfo("Select a medicine", "Click a medicine in the list first.")
             return
-        del self.items[int(sel[0])]
+        index = int(sel[0])
+        removed = self.items.pop(index)
+        self.history.push(("remove", index, removed))             # remember it for Undo
+        self.render_items()
+
+    def undo(self):
+        """Take back the most recent action (LIFO: the last thing done is undone first)."""
+        action = self.history.pop()
+        if action is None:
+            self._say("Nothing to undo.", T.MUTED)
+            return
+        if action[0] == "add":
+            _, sku, name, qty = action
+            for item in self.items:
+                if item["sku"] == sku:
+                    item["qty"] -= qty
+                    if item["qty"] <= 0:
+                        self.items.remove(item)
+                    break
+            self._say(f"Undone: added {name} x {qty}.", T.YELLOW)
+        else:
+            _, index, item = action
+            self.items.insert(min(index, len(self.items)), item)   # put it back where it was
+            self._say(f"Undone: removed {item['name']}.", T.YELLOW)
         self.render_items()
 
     # ---------- resident ----------
@@ -275,6 +311,7 @@ class CheckupView(tk.Frame):
                                    auth.current_user()["id"])
         rx = db.get_prescription(code)
         self.items = []
+        self.history.clear()                                       # a saved prescription cannot be undone
         self.resident = None
         self.resident_label.config(text="No resident selected.", fg=T.MUTED)
         self.res_combo.set("")
